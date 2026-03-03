@@ -1,3 +1,4 @@
+import json
 import os
 from typing import List, Tuple
 
@@ -223,3 +224,51 @@ DATABASE_CONFIG = {
 # Logging Configuration
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO")
 LOG_FORMAT = os.environ.get("LOG_FORMAT", "%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+
+# Mock/placeholder prediction configuration
+_severity_map_str = os.environ.get(
+    "ATTACK_SEVERITY_MAP",
+    "normal:none,dos:high,probe:medium,r2l:high,u2r:critical"
+)
+ATTACK_SEVERITY_MAP = {}
+for item in _severity_map_str.split(","):
+    if ":" in item:
+        k, v = item.split(":", 1)
+        ATTACK_SEVERITY_MAP[k.strip()] = v.strip()
+
+_default_mock_classes = sorted(set(ATTACK_MAP.values())) or ["normal"]
+MOCK_CLASS_NAMES = [
+    x.strip() for x in os.environ.get("MOCK_CLASS_NAMES", ",".join(_default_mock_classes)).split(",") if x.strip()
+]
+
+_weights_raw = [x.strip() for x in os.environ.get("MOCK_CLASS_WEIGHTS", "").split(",") if x.strip()]
+if _weights_raw and len(_weights_raw) == len(MOCK_CLASS_NAMES):
+    MOCK_CLASS_WEIGHTS = [float(x) for x in _weights_raw]
+else:
+    uniform = 1.0 / max(1, len(MOCK_CLASS_NAMES))
+    MOCK_CLASS_WEIGHTS = [uniform for _ in MOCK_CLASS_NAMES]
+
+MOCK_CONFIDENCE_MIN = float(os.environ.get("MOCK_CONFIDENCE_MIN", "0.7"))
+MOCK_CONFIDENCE_MAX = float(os.environ.get("MOCK_CONFIDENCE_MAX", "0.99"))
+
+def _load_metrics(env_key: str, fallback: dict):
+    raw = os.environ.get(env_key, "").strip()
+    if not raw:
+        return fallback
+    try:
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+    return fallback
+
+_metrics_base = {
+    "accuracy": 0.0,
+    "precision": 0.0,
+    "recall": 0.0,
+    "f1_score": 0.0,
+    "class_names": MOCK_CLASS_NAMES,
+}
+MOCK_MODEL_METRICS_UNLOADED = _load_metrics("MOCK_MODEL_METRICS_UNLOADED", _metrics_base)
+MOCK_MODEL_METRICS_LOADED = _load_metrics("MOCK_MODEL_METRICS_LOADED", _metrics_base)

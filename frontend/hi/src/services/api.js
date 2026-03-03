@@ -3,6 +3,10 @@ import axios from "axios";
 // Use relative path to go through Vite proxy
 const API = import.meta.env.VITE_API_URL || "/api";
 const API_TIMEOUT_MS = Number(import.meta.env.VITE_API_TIMEOUT_MS || 120000);
+const URL_SCAN_TIMEOUT_MS = Number(import.meta.env.VITE_URL_SCAN_TIMEOUT_MS || 90000);
+const URL_QUICK_SCAN_TIMEOUT_MS = Number(
+  import.meta.env.VITE_URL_QUICK_SCAN_TIMEOUT_MS || 30000
+);
 const CHAT_TIMEOUT_MS = Number(import.meta.env.VITE_CHAT_TIMEOUT_MS || 60000);
 const CHAT_STREAM_TIMEOUT_MS = Number(
   import.meta.env.VITE_CHAT_STREAM_TIMEOUT_MS || 120000
@@ -16,7 +20,8 @@ export const ackAlert = (id, notes) => api.patch(`/alerts/${id}/acknowledge`, { 
 export const deleteAlert = (id) => api.delete(`/alerts/${id}`);
 export const getTimeline = (p = "24h") => api.get(`/analytics/attack-timeline?period=${p}`);
 export const getTopSources = (n = 10) => api.get(`/analytics/top-sources?limit=${n}`);
-export const getCountryDistribution = (period = "24h") => api.get(`/analytics/country-distribution?period=${period}`);
+export const getCountryDistribution = (period = "24h", limit = 0) =>
+  api.get(`/analytics/country-distribution?period=${period}&limit=${limit}`);
 export const postPredict = (f) => api.post("/predict", f);
 export const getModelInfo = () => api.get("/predict/model-info");
 export const getAIHealth = () => api.get("/predict/health");
@@ -27,9 +32,9 @@ export const getSimStatus = () => api.get("/simulation/status");
 
 // URL Scanner - Deep & Quick
 export const scanUrl = (url, deep = true) =>
-  api.post("/url/scan", { url, deep_scan: deep });
+  api.post("/url/scan", { url, deep_scan: deep }, { timeout: URL_SCAN_TIMEOUT_MS });
 export const quickScanUrl = (url) =>
-  api.post("/url/scan", { url, deep_scan: false });
+  api.post("/url/scan", { url, deep_scan: false }, { timeout: URL_QUICK_SCAN_TIMEOUT_MS });
 export const batchScanUrls = (urls, deep = false) =>
   api.post("/url/batch", { urls, deep_scan: deep });
 export const getUrlHistory = (params) =>

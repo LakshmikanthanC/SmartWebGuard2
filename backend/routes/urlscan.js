@@ -8,9 +8,46 @@ const AI_URL = process.env.AI_ENGINE_URL || "http://localhost:5000";
 const GEOIPIFY_API_KEY = process.env.GEOIPIFY_API_KEY || "";
 const IPGEOLOCATION_API_KEY = process.env.IPGEOLOCATION_API_KEY || "";
 const IPINFO_TOKEN = process.env.IPINFO_TOKEN || "";
-const AI_SCAN_TIMEOUT_MS = Math.max(parseInt(process.env.AI_SCAN_TIMEOUT_MS || "120000", 10), 10000);
+const parsedAiScanTimeout = parseInt(process.env.AI_SCAN_TIMEOUT_MS || "25000", 10);
+const AI_SCAN_TIMEOUT_MS = Number.isFinite(parsedAiScanTimeout)
+  ? Math.min(Math.max(parsedAiScanTimeout, 5000), 25000)
+  : 25000;
 const AI_BATCH_TIMEOUT_MS = Math.max(parseInt(process.env.AI_BATCH_TIMEOUT_MS || "180000", 10), 10000);
+const parsedAiQuickRetryTimeout = parseInt(process.env.AI_QUICK_RETRY_TIMEOUT_MS || "10000", 10);
+const AI_QUICK_RETRY_TIMEOUT_MS = Number.isFinite(parsedAiQuickRetryTimeout)
+  ? Math.min(Math.max(parsedAiQuickRetryTimeout, 3000), 10000)
+  : 10000;
+const GEO_RESOLVE_TIMEOUT_MS = Math.max(parseInt(process.env.GEO_RESOLVE_TIMEOUT_MS || "1200", 10), 300);
 const RISK_RANK = { safe: 0, low: 1, medium: 2, high: 3, critical: 4 };
+const LEGACY_RECOMMENDATION_PATTERNS = [
+  /leave this website immediately/i,
+  /do not interact with any elements/i,
+];
+
+function sanitizeRecommendations(recommendations, riskLevel = "unknown") {
+  const incoming = Array.isArray(recommendations) ? recommendations : [];
+  const filtered = incoming
+    .map((r) => (typeof r === "string" ? r.trim() : ""))
+    .filter((r) => r && !LEGACY_RECOMMENDATION_PATTERNS.some((p) => p.test(r)));
+
+  if (filtered.length > 0) {
+    return [...new Set(filtered)].slice(0, 6);
+  }
+
+  if (riskLevel === "critical" || riskLevel === "high") {
+    return [
+      "Block this domain immediately, avoid any interaction, and investigate endpoint/browser activity before reopening.",
+    ];
+  }
+  if (riskLevel === "medium") {
+    return [
+      "Open only in an isolated environment and verify redirects/domain ownership before entering any data.",
+    ];
+  }
+  return [
+    "No immediate high-risk indicators in this scan; continue standard domain and certificate verification.",
+  ];
+}
 
 function normalizeHostname(rawUrl) {
   if (!rawUrl || typeof rawUrl !== "string") return null;
@@ -191,12 +228,11 @@ async function resolveCountryFromUrl(rawUrl) {
   return null;
 }
 
-// POST /api/url/scan — Always performs deep scan for thorough analysis
+// POST /api/url/scan
 router.post("/scan", async (req, res, next) => {
   try {
-    const { url } = req.body;
-    // Always use deep scan for thorough security analysis
-    const deep_scan = true;
+    const { url, deep_scan: requestedDeepScan } = req.body || {};
+    const deep_scan = requestedDeepScan === true;
 
     if (!url || !url.trim()) {
       return res.status(400).json({ error: "URL is required" });
@@ -205,16 +241,20 @@ router.post("/scan", async (req, res, next) => {
     const cleanUrl = url.trim();
     const hostname = normalizeHostname(cleanUrl);
 
-    // Cache check (1 hour) - always check for deep scan results
+    // Cache check (1 hour) - scoped by scan type
     const cached = await UrlScan.findOne({
       url: cleanUrl,
-      scanType: "deep",
+      scanType: deep_scan ? "deep" : "quick",
       createdAt: { $gte: new Date(Date.now() - 3600000) },
     })
       .sort({ createdAt: -1 })
       .lean();
 
     if (cached) {
+      const sanitizedRecommendations = sanitizeRecommendations(
+        cached.recommendations,
+        cached.riskLevel
+      );
       const cachedReplay = await UrlScan.create({
         url: cached.url,
         urlHash: cached.urlHash,
@@ -225,7 +265,7 @@ router.post("/scan", async (req, res, next) => {
         threats: cached.threats || [],
         warnings: cached.warnings || [],
         info: cached.info || [],
-        recommendations: cached.recommendations || [],
+        recommendations: sanitizedRecommendations,
         analysis: cached.analysis || {},
         malwareIndicators: cached.malwareIndicators || [],
         phishingIndicators: cached.phishingIndicators || [],
@@ -241,30 +281,62 @@ router.post("/scan", async (req, res, next) => {
     }
 
     const endpoint = "/api/url/scan";
+    const quickEndpoint = "/api/url/quick";
     const startTime = Date.now();
+    const countryPromise = resolveCountryFromUrl(cleanUrl).catch(() => null);
 
-    const { data: result } = await axios.post(
-      `${AI_URL}${endpoint}`,
-      { url: cleanUrl, deep_scan },
-      { timeout: AI_SCAN_TIMEOUT_MS }
-    );
+    let result;
+    let effectiveDeepScan = deep_scan;
+    try {
+      const { data } = await axios.post(
+        `${AI_URL}${endpoint}`,
+        { url: cleanUrl, deep_scan },
+        { timeout: AI_SCAN_TIMEOUT_MS }
+      );
+      result = data;
+    } catch (scanErr) {
+      const timedOut =
+        scanErr?.code === "ECONNABORTED" || /timeout/i.test(String(scanErr?.message || ""));
+      if (timedOut) {
+        try {
+          const { data } = await axios.post(
+            `${AI_URL}${quickEndpoint}`,
+            { url: cleanUrl },
+            { timeout: AI_QUICK_RETRY_TIMEOUT_MS }
+          );
+          result = data;
+          effectiveDeepScan = false;
+        } catch (quickErr) {
+          throw quickErr;
+        }
+      } else {
+        throw scanErr;
+      }
+    }
 
     const scanDuration = Date.now() - startTime;
+    const sanitizedRecommendations = sanitizeRecommendations(
+      result.recommendations,
+      result.risk_level
+    );
     const resolvedCountry =
-      (await resolveCountryFromUrl(cleanUrl)) ||
+      (await Promise.race([
+        countryPromise,
+        new Promise((resolve) => setTimeout(() => resolve(null), GEO_RESOLVE_TIMEOUT_MS)),
+      ])) ||
       fallbackCountryFromHostname(hostname);
 
     const scan = await UrlScan.create({
       url: cleanUrl,
       urlHash: result.url_hash,
-      scanType: result.scan_type || "deep",
+      scanType: result.scan_type || (effectiveDeepScan ? "deep" : "quick"),
       safe: result.safe,
       riskScore: result.risk_score,
       riskLevel: result.risk_level,
       threats: result.threats,
       warnings: result.warnings,
       info: result.info,
-      recommendations: result.recommendations,
+      recommendations: sanitizedRecommendations,
       analysis: result.analysis,
       malwareIndicators: result.malware_indicators,
       phishingIndicators: result.phishing_indicators,
@@ -296,11 +368,17 @@ router.post("/scan", async (req, res, next) => {
       countryFlag: scan.countryFlag,
       geoSource: scan.geoSource,
       timestamp: scan.createdAt,
+      fallbackToQuick: deep_scan && !effectiveDeepScan,
       cached: false,
     });
   } catch (err) {
     if (err.code === "ECONNREFUSED") {
       return res.status(503).json({ error: "AI Engine offline. Start ai-engine first." });
+    }
+    if (err.code === "ECONNABORTED" || /timeout/i.test(String(err.message || ""))) {
+      return res.status(504).json({
+        error: "Scan timed out. Please try Quick Scan or try again in a few moments.",
+      });
     }
     next(err);
   }
@@ -320,34 +398,39 @@ router.post("/batch", async (req, res, next) => {
       { timeout: AI_BATCH_TIMEOUT_MS }
     );
 
-    for (const r of data.results) {
-      const hostname = normalizeHostname(r.url);
-      const resolvedCountry =
-        (await resolveCountryFromUrl(r.url)) ||
-        fallbackCountryFromHostname(hostname);
+    await Promise.all(
+      data.results.map(async (r) => {
+        const hostname = normalizeHostname(r.url);
+        const resolvedCountry =
+          (await Promise.race([
+            resolveCountryFromUrl(r.url),
+            new Promise((resolve) => setTimeout(() => resolve(null), GEO_RESOLVE_TIMEOUT_MS)),
+          ])) ||
+          fallbackCountryFromHostname(hostname);
 
-      await UrlScan.create({
-        url: r.url,
-        urlHash: r.url_hash,
-        scanType: r.scan_type,
-        safe: r.safe,
-        riskScore: r.risk_score,
-        riskLevel: r.risk_level,
-        threats: r.threats,
-        warnings: r.warnings,
-        info: r.info,
-        recommendations: r.recommendations,
-        analysis: r.analysis,
-        malwareIndicators: r.malware_indicators,
-        phishingIndicators: r.phishing_indicators,
-        scanDuration: r.scan_duration_ms,
-        countryCode: resolvedCountry.countryCode,
-        countryName: resolvedCountry.countryName,
-        countryFlag: resolvedCountry.countryFlag,
-        resolvedIP: resolvedCountry.resolvedIP,
-        geoSource: resolvedCountry.geoSource,
-      });
-    }
+        await UrlScan.create({
+          url: r.url,
+          urlHash: r.url_hash,
+          scanType: r.scan_type,
+          safe: r.safe,
+          riskScore: r.risk_score,
+          riskLevel: r.risk_level,
+          threats: r.threats,
+          warnings: r.warnings,
+          info: r.info,
+          recommendations: r.recommendations,
+          analysis: r.analysis,
+          malwareIndicators: r.malware_indicators,
+          phishingIndicators: r.phishing_indicators,
+          scanDuration: r.scan_duration_ms,
+          countryCode: resolvedCountry.countryCode,
+          countryName: resolvedCountry.countryName,
+          countryFlag: resolvedCountry.countryFlag,
+          resolvedIP: resolvedCountry.resolvedIP,
+          geoSource: resolvedCountry.geoSource,
+        });
+      })
+    );
 
     res.json(data);
   } catch (err) {

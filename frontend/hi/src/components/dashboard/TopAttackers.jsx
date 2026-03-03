@@ -1,19 +1,32 @@
-import React, { useState, useEffect } from "react";
-import { getTopSources } from "../../services/api";
-import { fmtDate } from "../../utils/formatters";
+import React, { useMemo } from "react";
+import { useSocket } from "../../context/SocketContext";
 import "./TopAttackers.css";
 
-export default function TopAttackers() {
-  const [data, setData] = useState([]);
+export default function TopAttackers({ data: seedData = [] }) {
+  const { feed } = useSocket();
 
-  useEffect(() => {
-    const load = async () => {
-      try { const { data: d } = await getTopSources(8); setData(d); } catch {}
-    };
-    load();
-    const t = setInterval(load, 30000);
-    return () => clearInterval(t);
-  }, []);
+  const data = useMemo(() => {
+    const liveMap = {};
+
+    for (const item of feed || []) {
+      if (!item?.is_malicious) continue;
+      const ip = item?.sourceIP || "Unknown";
+      const type = String(item?.prediction || "unknown").toLowerCase();
+
+      if (!liveMap[ip]) {
+        liveMap[ip] = { _id: ip, count: 0, types: new Set() };
+      }
+      liveMap[ip].count += 1;
+      liveMap[ip].types.add(type);
+    }
+
+    const liveData = Object.values(liveMap)
+      .map((row) => ({ _id: row._id, count: row.count, types: Array.from(row.types) }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 8);
+
+    return liveData.length ? liveData : (seedData || []);
+  }, [feed, seedData]);
 
   if (!data.length) return null;
 

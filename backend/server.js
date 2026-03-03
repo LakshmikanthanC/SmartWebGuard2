@@ -21,26 +21,43 @@ const io = new Server(server, {
 });
 socketService.init(io);
 
-// Weighted country distribution for realistic attack simulation
-const COUNTRIES = [
-  { code: "US", weight: 25 },
-  { code: "CN", weight: 15 },
-  { code: "RU", weight: 12 },
-  { code: "DE", weight: 8 },
-  { code: "BR", weight: 7 },
-  { code: "IN", weight: 6 },
-  { code: "KR", weight: 5 },
-  { code: "JP", weight: 4 },
-  { code: "GB", weight: 4 },
-  { code: "FR", weight: 3 },
-  { code: "UA", weight: 3 },
-  { code: "NL", weight: 2 },
-  { code: "RO", weight: 2 },
-  { code: "VN", weight: 2 },
-  { code: "IR", weight: 2 },
-];
+const parseCountryWeights = () => {
+  const raw = String(process.env.SIM_COUNTRY_WEIGHTS || "").trim();
+  if (!raw) return [];
 
+  if (raw.startsWith("[")) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        return parsed
+          .map((item) => ({
+            code: String(item?.code || "").toUpperCase(),
+            weight: Number(item?.weight || 0),
+          }))
+          .filter((item) => /^[A-Z]{2}$/.test(item.code) && item.weight > 0);
+      }
+    } catch {
+      return [];
+    }
+  }
+
+  return raw
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .map((entry) => {
+      const [codeRaw, weightRaw] = entry.split(":");
+      return {
+        code: String(codeRaw || "").toUpperCase(),
+        weight: Number(weightRaw || 0),
+      };
+    })
+    .filter((item) => /^[A-Z]{2}$/.test(item.code) && item.weight > 0);
+};
+
+const COUNTRIES = parseCountryWeights();
 const COUNTRY_WEIGHTS = COUNTRIES.reduce((acc, c) => acc + c.weight, 0);
+const SIM_DEFAULT_COUNTRY = String(process.env.SIM_DEFAULT_COUNTRY || "ZZ").toUpperCase();
 const SIM_MIN_MALICIOUS_RATE = Math.min(
   1,
   Math.max(0, Number(process.env.SIM_MIN_MALICIOUS_RATE || 0.18))
@@ -65,13 +82,16 @@ const getCountryFromIP = (ip) => {
 };
 
 const getRandomCountry = () => {
+  if (!COUNTRIES.length || COUNTRY_WEIGHTS <= 0) {
+    return SIM_DEFAULT_COUNTRY;
+  }
   // Use weighted random selection
   let r = Math.random() * COUNTRY_WEIGHTS;
   for (const c of COUNTRIES) {
     r -= c.weight;
     if (r <= 0) return c.code;
   }
-  return "US";
+  return SIM_DEFAULT_COUNTRY;
 };
 
 const toSqlType = (name) => {

@@ -254,12 +254,13 @@ class URLAnalyzer:
         self.virustotal_key = _virustotal_key
         self.google_safe_browsing_key = _google_safe_browsing_key
         self.abuseipdb_key = _abuseipdb_key
-        self.external_api_timeout = int(_url_config.get("external_api_timeout", 6))
-        self.deep_scan_timeout = int(_url_config.get("deep_scan_timeout", 6))
-        self.deep_scan_max_bytes = int(_url_config.get("deep_scan_max_bytes", 500_000))
-        self.subpage_crawl_limit = int(_url_config.get("subpage_crawl_limit", 6))
-        self.subpage_crawl_timeout = int(_url_config.get("subpage_crawl_timeout", 4))
-        self.subpage_crawl_max_bytes = int(_url_config.get("subpage_crawl_max_bytes", 250_000))
+        self.fast_scan_mode = bool(_url_config.get("fast_scan_mode", True))
+        self.external_api_timeout = int(_url_config.get("external_api_timeout", 4))
+        self.deep_scan_timeout = int(_url_config.get("deep_scan_timeout", 4))
+        self.deep_scan_max_bytes = int(_url_config.get("deep_scan_max_bytes", 300_000))
+        self.subpage_crawl_limit = int(_url_config.get("subpage_crawl_limit", 2))
+        self.subpage_crawl_timeout = int(_url_config.get("subpage_crawl_timeout", 2))
+        self.subpage_crawl_max_bytes = int(_url_config.get("subpage_crawl_max_bytes", 120_000))
         self.country_mention_patterns = self._load_country_mention_patterns()
 
     # ==========================================================
@@ -602,15 +603,19 @@ class URLAnalyzer:
             self._check_url_encoding(url, result)
             self._check_redirect_params(url, result)
 
-            # SSL
-            self._check_ssl(parsed, result)
-
-            # Reputation
-            self._check_domain_reputation(parsed, result)
+            # Keep scans fast by avoiding network-heavy checks unless explicitly needed.
+            if deep_scan and not self.fast_scan_mode:
+                self._check_ssl(parsed, result)
+                self._check_domain_reputation(parsed, result, include_dns=True)
+            else:
+                result["analysis"]["ssl"]["checked"] = False
+                result["analysis"]["ssl"]["skipped_in_quick_scan"] = not deep_scan
+                result["analysis"]["ssl"]["skipped_for_speed"] = bool(deep_scan and self.fast_scan_mode)
+                self._check_domain_reputation(parsed, result, include_dns=False)
 
             # External API checks (VirusTotal, Google Safe Browsing, AbuseIPDB)
-            # Run only in deep mode to keep quick scans fast.
-            if deep_scan and HAS_REQUESTS and self.session:
+            # Run only when deep mode is requested and fast-mode is disabled.
+            if deep_scan and HAS_REQUESTS and self.session and not self.fast_scan_mode:
                 self._check_virustotal(url, result)
                 self._check_google_safe_browsing(url, result)
                 self._check_abuseipdb(parsed["domain"], result)
@@ -1072,7 +1077,7 @@ class URLAnalyzer:
     # DOMAIN REPUTATION
     # ==========================================================
 
-    def _check_domain_reputation(self, parsed, result):
+    def _check_domain_reputation(self, parsed, result, include_dns=True):
         domain = parsed["domain"]
         for trusted in self.trusted_domains:
             if domain == trusted or domain.endswith("." + trusted):
@@ -1090,6 +1095,12 @@ class URLAnalyzer:
         result["analysis"]["reputation"]["trusted"] = False
         result["analysis"]["reputation"]["category"] = "unknown"
 
+        if not include_dns:
+            result["analysis"]["domain"]["resolved_ip"] = None
+            result["analysis"]["reputation"]["dns_checked"] = False
+            return
+
+        result["analysis"]["reputation"]["dns_checked"] = True
         try:
             ip = socket.gethostbyname(domain)
             result["analysis"]["domain"]["resolved_ip"] = ip
@@ -1155,9 +1166,14 @@ class URLAnalyzer:
             self._analyze_headers(resp, result)
             self._analyze_redirects(resp, parsed, result)
             self._analyze_html(content, parsed, result)
-            self._discover_subpages_from_sitemap(parsed, result)
             self._extract_country_mentions(content, result)
-            self._crawl_subpages_for_countries(result)
+            if not self.fast_scan_mode:
+                self._discover_subpages_from_sitemap(parsed, result)
+                self._crawl_subpages_for_countries(result)
+            else:
+                result["analysis"]["content"]["subpages"] = []
+                result["analysis"]["content"]["subpages_crawled"] = 0
+                result["analysis"]["content"]["subpage_country_mentions"] = []
             self._detect_malicious_scripts(content, result)
             self._detect_cryptominers(content, result)
             self._detect_hidden_iframes(content, result)
@@ -1576,8 +1592,8 @@ class URLAnalyzer:
                     "execute hidden code, steal data, or download "
                     "additional malicious payloads.",
                     evidence=f"Found {len(matches)} occurrence(s)",
-                    recommendation="Leave this website immediately. "
-                                   "Do not interact with any elements.",
+                    recommendation="Detected malicious script behavior. "
+                                   "Block this domain, avoid clicks/downloads, and inspect browser/network logs before any further access.",
                     risk_points=12,
                 ))
 
@@ -1860,6 +1876,88 @@ class URLAnalyzer:
     # FINALIZE
     # ==========================================================
 
+    def _build_actionable_recommendations(self, result):
+        recs = []
+        analysis = result.get("analysis", {})
+        categories = set(result.get("categories_detected") or [])
+        domain = (
+            analysis.get("domain", {}).get("name")
+            or analysis.get("url_structure", {}).get("domain")
+            or "this domain"
+        )
+
+        has_phishing = CAT_PHISHING in categories or bool(result.get("phishing_indicators"))
+        has_malware = bool(result.get("malware_indicators")) or CAT_MALWARE in categories
+        has_script_risk = CAT_SCRIPT in categories or CAT_CRYPTO in categories
+        suspicious_forms = analysis.get("forms", {}).get("suspicious") or []
+        redirects = analysis.get("redirects", {})
+        redirect_count = int(redirects.get("count", 0) or 0)
+        final_url = redirects.get("final_url")
+        ssl = analysis.get("ssl", {})
+        protocol = ssl.get("protocol")
+        ssl_invalid = ssl.get("checked") and ssl.get("valid") is False
+        headers_missing = len(analysis.get("headers", {}).get("security_headers_missing") or [])
+
+        rep = analysis.get("reputation", {})
+        vt = rep.get("virustotal", {})
+        vt_mal = int(vt.get("malicious", 0) or 0)
+        vt_susp = int(vt.get("suspicious", 0) or 0)
+        gsb = rep.get("google_safe_browsing", {})
+        gsb_match = bool(gsb.get("matches")) or bool(gsb.get("threat_types"))
+
+        if has_phishing:
+            recs.append(
+                f"Do not sign in on {domain}. Open the official site manually from a bookmark and verify the exact domain before entering credentials."
+            )
+        if suspicious_forms:
+            target = suspicious_forms[0].get("target") or suspicious_forms[0].get("action") or "a different domain"
+            recs.append(
+                f"Review form submission targets: this page posts credentials to {target}. Avoid submitting passwords on cross-domain forms."
+            )
+        if ssl_invalid or protocol == "http":
+            recs.append(
+                "Only continue over a valid HTTPS connection. If certificate validation fails or protocol is HTTP, stop and use the verified secure URL."
+            )
+        if has_malware or has_script_risk:
+            recs.append(
+                "Treat this URL as potentially malicious: avoid downloads, disable script execution for this site, and run endpoint malware scan if it was opened."
+            )
+        if redirect_count > 0:
+            destination = final_url or "the final destination URL"
+            recs.append(
+                f"Inspect redirect chain before trusting the page. Confirm the final destination ({destination}) belongs to the expected service."
+            )
+        if vt_mal > 0 or vt_susp > 0 or gsb_match:
+            recs.append(
+                "Block this domain in DNS/web gateway and share IOC details with your security team for broader containment."
+            )
+        if headers_missing >= 4:
+            recs.append(
+                "For site owners: add core security headers (CSP, HSTS, X-Frame-Options, X-Content-Type-Options) to reduce browser-side attack surface."
+            )
+
+        if result.get("risk_level") in ("critical", "high"):
+            recs.append(
+                "Quarantine this indicator: block the URL/domain, preserve logs, and investigate source host activity for related compromise."
+            )
+        elif result.get("risk_level") == "medium":
+            recs.append(
+                "Allow only with caution: open in isolated browser/container, monitor network calls, and re-scan after redirects/content changes."
+            )
+        elif result.get("risk_level") == "safe":
+            recs.append(
+                "No major threat indicators found in this scan; continue normal verification practices and monitor for future content changes."
+            )
+
+        seen = set()
+        ordered = []
+        for r in recs:
+            clean = " ".join(str(r).split()).strip()
+            if clean and clean not in seen:
+                seen.add(clean)
+                ordered.append(clean)
+        return ordered[:6]
+
     def _finalize(self, result, start_time):
         score = min(100, max(0, result["risk_score"]))
         result["risk_score"] = score
@@ -1885,6 +1983,7 @@ class URLAnalyzer:
         result["findings"].sort(
             key=lambda f: sev_order.get(f["severity"], 5)
         )
+        result["recommendations"] = self._build_actionable_recommendations(result)
 
         # Build report summary
         result["report"]["total_findings"] = len(result["findings"])
@@ -1905,4 +2004,3 @@ analyzer = URLAnalyzer()
 
 def analyze_url(url, deep_scan=True):
     return analyzer.analyze(url, deep_scan)
-

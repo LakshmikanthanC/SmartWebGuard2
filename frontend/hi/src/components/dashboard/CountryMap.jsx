@@ -7,30 +7,26 @@ import { useSocket } from "../../context/SocketContext";
 
 ChartJS.register(CategoryScale, LinearScale, BarElement, Tooltip, Legend);
 
-// Country code to name mapping
-const countryNames = {
-  US: "United States", CN: "China", RU: "Russia", DE: "Germany", FR: "France",
-  GB: "United Kingdom", JP: "Japan", IN: "India", BR: "Brazil", CA: "Canada",
-  AU: "Australia", KR: "South Korea", NL: "Netherlands", IT: "Italy", ES: "Spain",
-  IR: "Iran", UA: "Ukraine", PL: "Poland", TR: "Turkey", VN: "Vietnam",
-  ID: "Indonesia", TH: "Thailand", MY: "Malaysia", PH: "Philippines", SG: "Singapore",
-  MX: "Mexico", AR: "Argentina", CO: "Colombia", CL: "Chile", PE: "Peru",
-  EG: "Egypt", NG: "Nigeria", ZA: "South Africa", KE: "Kenya", MA: "Morocco",
-  RO: "Romania", SE: "Sweden", NO: "Norway", FI: "Finland", DK: "Denmark",
-  CH: "Switzerland", AT: "Austria", BE: "Belgium", IE: "Ireland", PT: "Portugal",
-  GR: "Greece", CZ: "Czech Republic", HU: "Hungary", IL: "Israel", SA: "Saudi Arabia",
-  AE: "United Arab Emirates", PK: "Pakistan", BD: "Bangladesh", Unknown: "Unknown",
+const regionNames = new Intl.DisplayNames(["en"], { type: "region" });
+const getCountryName = (code) => {
+  const normalized = String(code || "").toUpperCase();
+  if (!normalized || normalized === "UNKNOWN" || normalized === "ZZ") return "Unknown";
+  return regionNames.of(normalized) || normalized;
 };
 
-const getCountryName = (code) => countryNames[code] || code;
-
-const countryColors = {
-  US: "#3b82f6", CN: "#ef4444", RU: "#f97316", DE: "#22c55e", FR: "#8b5cf6",
-  GB: "#ec4899", JP: "#06b6d4", IN: "#eab308", BR: "#84cc16", CA: "#f43f5e",
-  default: "#6366f1",
+const hashCode = (value) => {
+  let hash = 0;
+  const text = String(value || "");
+  for (let i = 0; i < text.length; i += 1) {
+    hash = (hash << 5) - hash + text.charCodeAt(i);
+    hash |= 0;
+  }
+  return Math.abs(hash);
 };
-
-const getCountryColor = (code) => countryColors[code] || countryColors.default;
+const getCountryColor = (code) => {
+  const hue = hashCode(code) % 360;
+  return `hsl(${hue}, 70%, 55%)`;
+};
 
 export default function CountryMap() {
   const { countryStats } = useSocket();
@@ -41,7 +37,7 @@ export default function CountryMap() {
   useEffect(() => {
     const fetchData = async () => {
       try {
-        const res = await getCountryDistribution(period);
+        const res = await getCountryDistribution(period, 0);
         setCountryData(res.data);
       } catch (err) {
         console.error("Failed to fetch country data:", err);
@@ -56,24 +52,25 @@ export default function CountryMap() {
 
   // Merge real-time country stats with historical data - must be called before any early returns
   const mergedData = useMemo(() => {
-    if (!countryData?.countries) return [];
-    
-    const merged = [...countryData.countries];
-    
-    // Add real-time data from socket
-    Object.entries(countryStats).forEach(([country, count]) => {
-      const existing = merged.find(c => c.country === country);
-      if (existing) {
-        existing.count += count;
-      } else {
-        merged.push({ country, count, types: [] });
-      }
+    const mergedMap = {};
+
+    // Historical data from API.
+    (countryData?.countries || []).forEach((c) => {
+      const key = c.country || "Unknown";
+      if (!mergedMap[key]) mergedMap[key] = { country: key, count: 0, types: [] };
+      mergedMap[key].count += Number(c.count || 0);
+      const incomingTypes = Array.isArray(c.types) ? c.types : [];
+      mergedMap[key].types = [...new Set([...(mergedMap[key].types || []), ...incomingTypes])];
     });
-    
-    // Sort by count descending
-    merged.sort((a, b) => b.count - a.count);
-    
-    return merged;
+
+    // Live socket increments.
+    Object.entries(countryStats).forEach(([country, count]) => {
+      const key = country || "Unknown";
+      if (!mergedMap[key]) mergedMap[key] = { country: key, count: 0, types: [] };
+      mergedMap[key].count += Number(count || 0);
+    });
+
+    return Object.values(mergedMap).sort((a, b) => b.count - a.count);
   }, [countryData, countryStats]);
 
   if (loading) {
@@ -101,7 +98,7 @@ export default function CountryMap() {
     );
   }
 
-  const countries = mergedData.slice(0, 10);
+  const countries = mergedData;
   const total = countryData?.total || 0;
   const realtimeTotal = Object.values(countryStats).reduce((a, b) => a + b, 0);
   const displayTotal = total + realtimeTotal;
@@ -109,6 +106,7 @@ export default function CountryMap() {
   const labels = countries.map((c) => getCountryName(c.country));
   const values = countries.map((c) => c.count);
   const colors = countries.map((c) => getCountryColor(c.country));
+  const chartHeight = Math.max(320, countries.length * 24);
 
   const data = {
     labels,
@@ -119,6 +117,10 @@ export default function CountryMap() {
       borderColor: colors,
       borderWidth: 1,
       borderRadius: 4,
+      barThickness: 12,
+      maxBarThickness: 18,
+      categoryPercentage: 0.8,
+      barPercentage: 0.9,
     }],
   };
 
@@ -168,8 +170,10 @@ export default function CountryMap() {
           <option value="30d">Last 30 Days</option>
         </select>
       </div>
-      <div style={{ maxHeight: 300, overflowY: "auto", position: "relative" }}>
-        <Bar data={data} options={options} />
+      <div style={{ maxHeight: 420, overflowY: "auto", position: "relative" }}>
+        <div style={{ height: chartHeight }}>
+          <Bar data={data} options={options} />
+        </div>
       </div>
       <div style={{ padding: "12px 0 0", borderTop: "1px solid #2a3370", marginTop: "8px" }}>
         <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.75rem", color: "#8f96b8" }}>

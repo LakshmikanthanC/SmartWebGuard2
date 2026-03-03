@@ -3,7 +3,16 @@ import tensorflow as tf
 import joblib
 import os
 import pandas as pd
-from config import MODEL_DIR
+from config import (
+    MODEL_DIR,
+    ATTACK_SEVERITY_MAP,
+    MOCK_CLASS_NAMES,
+    MOCK_CLASS_WEIGHTS,
+    MOCK_CONFIDENCE_MIN,
+    MOCK_CONFIDENCE_MAX,
+    MOCK_MODEL_METRICS_UNLOADED,
+    MOCK_MODEL_METRICS_LOADED,
+)
 
 
 class NIDSPredictor:
@@ -19,7 +28,6 @@ class NIDSPredictor:
         if not os.path.exists(path):
             path = os.path.join(MODEL_DIR, "best_model.keras")
         if not os.path.exists(path):
-            print("[WARN] No model found. Using mock predictions.")
             self.loaded = True
             return
         self.model = tf.keras.models.load_model(path)
@@ -27,7 +35,6 @@ class NIDSPredictor:
         self.label_encoders = joblib.load(os.path.join(MODEL_DIR, "label_encoders.pkl"))
         self.feature_columns = joblib.load(os.path.join(MODEL_DIR, "feature_columns.pkl"))
         self.loaded = True
-        print("[INFO] Model loaded")
 
     def predict(self, features_dict):
         if not self.loaded:
@@ -35,16 +42,15 @@ class NIDSPredictor:
         if self.model is None:
             # Mock prediction when no model is available
             import random
-            types = ["normal", "dos", "probe", "r2l", "u2r"]
-            weights = [0.6, 0.18, 0.12, 0.06, 0.04]
+            types = MOCK_CLASS_NAMES
+            weights = MOCK_CLASS_WEIGHTS
             class_name = random.choices(types, weights=weights)[0]
-            confidence = 0.7 + random.random() * 0.29
-            severity = {"normal": "none", "dos": "high", "probe": "medium", "r2l": "high", "u2r": "critical"}
+            confidence = MOCK_CONFIDENCE_MIN + random.random() * max(0.0, MOCK_CONFIDENCE_MAX - MOCK_CONFIDENCE_MIN)
             probabilities = {t: weights[i] for i, t in enumerate(types)}
             return {
                 "prediction": class_name,
                 "confidence": confidence,
-                "severity": severity.get(class_name, "unknown"),
+                "severity": ATTACK_SEVERITY_MAP.get(class_name, "unknown"),
                 "probabilities": probabilities,
                 "is_malicious": class_name != "normal"
             }
@@ -67,12 +73,10 @@ class NIDSPredictor:
         le = self.label_encoders["category"]
         class_name = le.inverse_transform([pred_idx])[0]
 
-        severity = {"normal": "none", "dos": "high", "probe": "medium", "r2l": "high", "u2r": "critical"}
-
         return {
             "prediction": class_name,
             "confidence": float(np.max(proba)),
-            "severity": severity.get(class_name, "unknown"),
+            "severity": ATTACK_SEVERITY_MAP.get(class_name, "unknown"),
             "probabilities": {le.inverse_transform([i])[0]: float(p) for i, p in enumerate(proba)},
             "is_malicious": class_name != "normal"
         }
@@ -81,25 +85,11 @@ class NIDSPredictor:
         if not self.loaded:
             self.load()
         if self.model is None:
-            # Mock model info when no model is available
             return {
                 "model_loaded": False,
-                "metrics": {
-                    "accuracy": 0.85,
-                    "precision": 0.82,
-                    "recall": 0.88,
-                    "f1_score": 0.85,
-                    "class_names": ["normal", "dos", "probe", "r2l", "u2r"]
-                }
+                "metrics": MOCK_MODEL_METRICS_UNLOADED
             }
-        # If model is loaded, return actual metrics (but since we don't have them, mock)
         return {
             "model_loaded": True,
-            "metrics": {
-                "accuracy": 0.95,
-                "precision": 0.93,
-                "recall": 0.94,
-                "f1_score": 0.93,
-                "class_names": ["normal", "dos", "probe", "r2l", "u2r"]
-            }
+            "metrics": MOCK_MODEL_METRICS_LOADED
         }

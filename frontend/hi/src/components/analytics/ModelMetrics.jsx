@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { Line } from "react-chartjs-2";
 import {
   Chart as ChartJS,
@@ -23,19 +23,25 @@ ChartJS.register(
 export default function ModelMetrics() {
   const [info, setInfo] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [lastUpdated, setLastUpdated] = useState(null);
+
+  const load = useCallback(async () => {
+    try {
+      const { data } = await getModelInfo();
+      setInfo(data);
+      setLastUpdated(new Date());
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
-    const load = async () => {
-      try {
-        const { data } = await getModelInfo();
-        setInfo(data);
-      } catch (e) {
-        console.error(e);
-      }
-      setLoading(false);
-    };
     load();
-  }, []);
+    const iv = setInterval(load, 10000);
+    return () => clearInterval(iv);
+  }, [load]);
 
   if (loading) {
     return (
@@ -65,6 +71,12 @@ export default function ModelMetrics() {
   }
 
   const m = info.metrics;
+  const hasMetrics = !!info?.metrics;
+  const modelStatus = info?.model_loaded
+    ? { label: "Loaded", color: "var(--green)" }
+    : hasMetrics
+      ? { label: "Demo Mode", color: "var(--orange)" }
+      : { label: "Not Loaded", color: "var(--red)" };
 
   const metricCards = [
     { label: "Accuracy", value: m.accuracy, color: "var(--green)" },
@@ -175,16 +187,21 @@ export default function ModelMetrics() {
     <div className="card">
       <div className="card-hdr">
         <span className="card-title">🧠 Model Performance</span>
-        <span
-          style={{
-            fontSize: "0.72rem",
-            color: info.model_loaded ? "var(--green)" : "var(--red)",
-            fontFamily: "var(--mono)",
-            fontWeight: 600,
-          }}
-        >
-          {info.model_loaded ? "● Model Loaded" : "● Not Loaded"}
-        </span>
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 2 }}>
+          <span
+            style={{
+              fontSize: "0.72rem",
+              color: modelStatus.color,
+              fontFamily: "var(--mono)",
+              fontWeight: 600,
+            }}
+          >
+            {`Status: ${modelStatus.label}`}
+          </span>
+          <span style={{ fontSize: "0.66rem", color: "var(--text-dim)", fontFamily: "var(--mono)" }}>
+            {lastUpdated ? `Updated: ${lastUpdated.toLocaleTimeString()}` : "Updated: --"}
+          </span>
+        </div>
       </div>
 
       {/* Metric Summary Cards */}

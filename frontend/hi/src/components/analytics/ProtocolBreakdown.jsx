@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useMemo, useState, useEffect } from "react";
 import { Bar } from "react-chartjs-2";
 import {
   Chart as ChartJS,
@@ -9,66 +9,72 @@ import {
   Legend,
 } from "chart.js";
 import { getAlerts } from "../../services/api";
+import { useSocket } from "../../context/SocketContext";
 
 ChartJS.register(CategoryScale, LinearScale, BarElement, Tooltip, Legend);
 
 export default function ProtocolBreakdown() {
-  const [chartData, setChartData] = useState(null);
+  const [seedAlerts, setSeedAlerts] = useState([]);
+  const { feed } = useSocket();
 
   useEffect(() => {
     const load = async () => {
       try {
         const { data } = await getAlerts({ limit: 500, page: 1 });
-        const alerts = data.alerts || [];
-
-        const protoCounts = {};
-        const protoAttacks = {};
-
-        alerts.forEach((a) => {
-          const proto = (a.protocol || "tcp").toUpperCase();
-          const type = a.attackType || "unknown";
-
-          if (!protoCounts[proto]) protoCounts[proto] = 0;
-          protoCounts[proto]++;
-
-          if (!protoAttacks[proto]) protoAttacks[proto] = {};
-          if (!protoAttacks[proto][type]) protoAttacks[proto][type] = 0;
-          protoAttacks[proto][type]++;
-        });
-
-        const protocols = Object.keys(protoCounts).sort(
-          (a, b) => protoCounts[b] - protoCounts[a]
-        );
-
-        const attackTypes = [...new Set(alerts.map((a) => a.attackType))].filter(Boolean);
-        const colors = {
-          dos: "#ff4757",
-          probe: "#ff9800",
-          r2l: "#4d8dff",
-          u2r: "#a855f7",
-        };
-
-        const datasets = attackTypes.map((type) => ({
-          label: type.toUpperCase(),
-          data: protocols.map((p) => protoAttacks[p]?.[type] || 0),
-          backgroundColor: (colors[type] || "#5c6490") + "80",
-          borderColor: colors[type] || "#5c6490",
-          borderWidth: 1.5,
-          borderRadius: 4,
-        }));
-
-        setChartData({
-          labels: protocols,
-          datasets,
-        });
+        setSeedAlerts(data.alerts || []);
       } catch (e) {
         console.error(e);
       }
     };
     load();
-    const iv = setInterval(load, 30000);
-    return () => clearInterval(iv);
   }, []);
+
+  const chartData = useMemo(() => {
+    const source = feed.length
+      ? feed.map((f) => ({
+          protocol: f.protocol || "tcp",
+          attackType: f.prediction || "unknown",
+        }))
+      : seedAlerts;
+
+    const protoCounts = {};
+    const protoAttacks = {};
+
+    source.forEach((a) => {
+      const proto = String(a.protocol || "tcp").toUpperCase();
+      const type = String(a.attackType || "unknown").toLowerCase();
+      if (type === "normal") return;
+
+      if (!protoCounts[proto]) protoCounts[proto] = 0;
+      protoCounts[proto] += 1;
+
+      if (!protoAttacks[proto]) protoAttacks[proto] = {};
+      if (!protoAttacks[proto][type]) protoAttacks[proto][type] = 0;
+      protoAttacks[proto][type] += 1;
+    });
+
+    const protocols = Object.keys(protoCounts).sort((a, b) => protoCounts[b] - protoCounts[a]);
+    const attackTypes = [...new Set(source.map((a) => String(a.attackType || "").toLowerCase()))]
+      .filter((t) => t && t !== "normal");
+
+    const colors = {
+      dos: "#ff4757",
+      probe: "#ff9800",
+      r2l: "#4d8dff",
+      u2r: "#a855f7",
+    };
+
+    const datasets = attackTypes.map((type) => ({
+      label: type.toUpperCase(),
+      data: protocols.map((p) => protoAttacks[p]?.[type] || 0),
+      backgroundColor: (colors[type] || "#5c6490") + "80",
+      borderColor: colors[type] || "#5c6490",
+      borderWidth: 1.5,
+      borderRadius: 4,
+    }));
+
+    return { labels: protocols, datasets };
+  }, [feed, seedAlerts]);
 
   if (!chartData) {
     return (
@@ -79,6 +85,20 @@ export default function ProtocolBreakdown() {
         <div className="empty">
           <div className="empty-icon">🔌</div>
           <p>Loading protocol data...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!chartData.labels?.length) {
+    return (
+      <div className="card">
+        <div className="card-hdr">
+          <span className="card-title">🔌 Protocol Breakdown</span>
+        </div>
+        <div className="empty">
+          <div className="empty-icon">📡</div>
+          <p>Waiting for live protocol traffic...</p>
         </div>
       </div>
     );

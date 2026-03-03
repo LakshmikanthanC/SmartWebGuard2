@@ -112,16 +112,21 @@ router.get("/top-sources", async (req, res, next) => {
 router.get("/country-distribution", async (req, res, next) => {
   try {
     const { period = "24h" } = req.query;
+    const limit = Math.max(parseInt(req.query.limit || "0", 10), 0);
     const ms = { "1h": 36e5, "24h": 864e5, "7d": 6048e5, "30d": 2592e6 };
     const windowMs = ms[period] || 864e5;
     const since = new Date(Date.now() - windowMs);
 
-    const countryData = await Alert.aggregate([
+    const pipeline = [
       { $match: { timestamp: { $gte: since } } },
       { $group: { _id: "$sourceCountry", count: { $sum: 1 }, types: { $addToSet: "$attackType" } } },
       { $sort: { count: -1 } },
-      { $limit: 20 },
-    ]);
+    ];
+    if (limit > 0) {
+      pipeline.push({ $limit: limit });
+    }
+
+    const countryData = await Alert.aggregate(pipeline);
 
     const distribution = {};
     countryData.forEach((item) => {

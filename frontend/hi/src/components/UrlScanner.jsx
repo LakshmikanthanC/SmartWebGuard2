@@ -134,7 +134,7 @@ export default function UrlScanner() {
   // EVENT HANDLERS
   // ============================================================
   const handleKeyDown = (e) => {
-    if (e.key === "Enter" && !loading) handleScan(true);
+    if (e.key === "Enter" && !loading) handleScan(false);
   };
 
   const handleDeleteScan = async (id) => {
@@ -411,9 +411,9 @@ export default function UrlScanner() {
               />
               <button
                 className="btn btn-ghost us-scan-btn"
-                onClick={() => handleScan(true)}
+                onClick={() => handleScan(false)}
                 disabled={loading}
-                title="Deep scan — fetches and analyzes page content"
+                title="Quick scan - faster URL checks without deep page crawling"
               >
                 ⚡ Quick
               </button>
@@ -1780,9 +1780,6 @@ export default function UrlScanner() {
     </div>
   );
 }
-
-
-
 
 
 

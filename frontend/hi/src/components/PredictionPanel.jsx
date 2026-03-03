@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { postPredict, getModelInfo } from "../services/api";
 import { sevColor, sevBg, atkIcon, atkColor, fmtPct } from "../utils/formatters";
 import "./PredictionPanel.css";
@@ -187,12 +187,12 @@ export default function PredictionPanel() {
   const [modelInfo, setModelInfo] = useState(null);
   const [modelLoading, setModelLoading] = useState(false);
 
-  const handlePredict = async () => {
+  const runPredict = async (values) => {
     setLoading(true);
     setError(null);
     setResult(null);
     try {
-      const { data } = await postPredict(featureValues);
+      const { data } = await postPredict(values);
       if (data.error) {
         const err = data.error;
         const errMsg = typeof err === 'object' ? err.message || JSON.stringify(err) : err;
@@ -206,6 +206,10 @@ export default function PredictionPanel() {
       setError(errMsg);
     }
     setLoading(false);
+  };
+
+  const handlePredict = async () => {
+    await runPredict(featureValues);
   };
 
   const loadModelInfo = async () => {
@@ -237,6 +241,12 @@ export default function PredictionPanel() {
       [field]: value
     }));
   };
+
+  useEffect(() => {
+    const initialSample = { ...SAMPLE_NORMAL };
+    setFeatureValues(initialSample);
+    runPredict(initialSample);
+  }, []);
 
   // Get all keys from the sample object for consistent ordering
   const fieldKeys = Object.keys(SAMPLE_NORMAL);
@@ -457,11 +467,21 @@ export default function PredictionPanel() {
                 <div className="pp-error">{modelInfo.error}</div>
               ) : (
                 <div className="pp-model-info">
+                  {(() => {
+                    const hasMetrics = !!modelInfo.metrics;
+                    const statusLabel = modelInfo.model_loaded
+                      ? "Loaded"
+                      : hasMetrics
+                        ? "Demo Mode"
+                        : "Not Loaded";
+                    return (
                   <div className="pp-model-status">
                     <span className="pp-ms-dot" />
                     Model:{" "}
-                    {modelInfo.model_loaded ? "Loaded" : "Not Loaded"}
+                    {statusLabel}
                   </div>
+                    );
+                  })()}
                   {modelInfo.metrics && (
                     <div className="pp-metrics-grid">
                       <div className="pp-metric">
@@ -510,8 +530,8 @@ export default function PredictionPanel() {
               <div className="empty">
                 <div className="empty-icon">🤖</div>
                 <p>
-                  Submit traffic features or load a sample to see AI
-                  predictions
+                  Default sample is auto-loaded and predicted.
+                  Edit fields or load another sample, then click Predict.
                 </p>
               </div>
             </div>

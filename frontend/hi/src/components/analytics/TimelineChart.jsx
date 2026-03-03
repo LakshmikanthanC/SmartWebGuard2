@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useMemo, useState, useEffect } from "react";
 import { Line } from "react-chartjs-2";
 import {
   Chart as ChartJS,
@@ -11,6 +11,7 @@ import {
   Filler,
 } from "chart.js";
 import { getTimeline } from "../../services/api";
+import { useSocket } from "../../context/SocketContext";
 
 ChartJS.register(
   CategoryScale,
@@ -33,6 +34,7 @@ export default function TimelineChart() {
   const [data, setData] = useState([]);
   const [period, setPeriod] = useState("24h");
   const [loading, setLoading] = useState(true);
+  const { feed } = useSocket();
 
   useEffect(() => {
     const load = async () => {
@@ -46,11 +48,61 @@ export default function TimelineChart() {
       setLoading(false);
     };
     load();
-    const iv = setInterval(load, 30000);
-    return () => clearInterval(iv);
   }, [period]);
 
-  if (loading && !data.length) {
+  const liveSeries = useMemo(() => {
+    if (!feed.length) return [];
+
+    const now = Date.now();
+    const periodMsMap = {
+      "1h": 60 * 60 * 1000,
+      "24h": 24 * 60 * 60 * 1000,
+      "7d": 7 * 24 * 60 * 60 * 1000,
+      "30d": 30 * 24 * 60 * 60 * 1000,
+    };
+    const bucketMinutesMap = {
+      "1h": 5,
+      "24h": 60,
+      "7d": 360,
+      "30d": 1440,
+    };
+    const periodMs = periodMsMap[period] || periodMsMap["24h"];
+    const bucketMs = (bucketMinutesMap[period] || 60) * 60 * 1000;
+    const cutoff = now - periodMs;
+
+    const buckets = new Map();
+    const startBucket = Math.floor(cutoff / bucketMs) * bucketMs;
+    const endBucket = Math.floor(now / bucketMs) * bucketMs;
+    for (let t = startBucket; t <= endBucket; t += bucketMs) {
+      buckets.set(t, { dos: 0, probe: 0, r2l: 0, u2r: 0 });
+    }
+
+    for (const item of feed) {
+      const ts = Date.parse(item?.timestamp || "");
+      if (!Number.isFinite(ts) || ts < cutoff) continue;
+      const bucketTime = Math.floor(ts / bucketMs) * bucketMs;
+      if (!buckets.has(bucketTime)) continue;
+      const type = String(item?.prediction || "").toLowerCase();
+      if (["dos", "probe", "r2l", "u2r"].includes(type)) {
+        const row = buckets.get(bucketTime);
+        row[type] += 1;
+      }
+    }
+
+    return [...buckets.entries()]
+      .sort((a, b) => a[0] - b[0])
+      .map(([ts, row]) => ({
+        time:
+          period === "30d"
+            ? new Date(ts).toLocaleDateString("en-US", { month: "short", day: "numeric" })
+            : new Date(ts).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" }),
+        ...row,
+      }));
+  }, [feed, period]);
+
+  const seriesData = liveSeries.length ? liveSeries : data;
+
+  if (loading && !seriesData.length) {
     return (
       <div className="card">
         <div className="card-hdr">
@@ -63,7 +115,7 @@ export default function TimelineChart() {
     );
   }
 
-  if (!data.length) {
+  if (!seriesData.length) {
     return (
       <div className="card">
         <div className="card-hdr">
@@ -88,11 +140,11 @@ export default function TimelineChart() {
     );
   }
 
-  const labels = data.map((d) => d.time);
+  const labels = seriesData.map((d) => d.time);
   const types = ["dos", "probe", "r2l", "u2r"];
   const datasets = types.map((t) => ({
     label: t.toUpperCase(),
-    data: data.map((r) => r[t] || 0),
+    data: seriesData.map((r) => r[t] || 0),
     borderColor: COLORS[t],
     backgroundColor: COLORS[t] + "18",
     fill: true,

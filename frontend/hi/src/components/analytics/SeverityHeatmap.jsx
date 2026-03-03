@@ -1,9 +1,11 @@
-import React, { useState, useEffect } from "react";
+import React, { useMemo, useState, useEffect } from "react";
 import { getDashboard } from "../../services/api";
+import { useSocket } from "../../context/SocketContext";
 import { sevColor } from "../../utils/formatters";
 
 export default function SeverityHeatmap() {
   const [data, setData] = useState(null);
+  const { feed } = useSocket();
 
   useEffect(() => {
     const load = async () => {
@@ -15,18 +17,31 @@ export default function SeverityHeatmap() {
       }
     };
     load();
-    const iv = setInterval(load, 30000);
-    return () => clearInterval(iv);
   }, []);
 
   const severities = ["critical", "high", "medium", "low", "none"];
-  const dist = data?.severityDistribution || {};
+  const liveDist = useMemo(() => {
+    const acc = { critical: 0, high: 0, medium: 0, low: 0, none: 0 };
+    for (const item of feed) {
+      const raw = String(item?.severity || "none").toLowerCase();
+      const sev = Object.prototype.hasOwnProperty.call(acc, raw) ? raw : "none";
+      acc[sev] += 1;
+    }
+    return acc;
+  }, [feed]);
+  const dist = feed.length ? liveDist : (data?.severityDistribution || {});
   const total = Object.values(dist).reduce((a, b) => a + b, 0) || 1;
+  const basisMessage = feed.length
+    ? "Basis: Live traffic feed severity (realtime)"
+    : "Basis: Dashboard API severity distribution";
 
   return (
     <div className="card">
       <div className="card-hdr">
         <span className="card-title">🌡️ Severity Distribution</span>
+      </div>
+      <div style={{ fontSize: "0.72rem", color: "var(--text-dim)", marginBottom: 10 }}>
+        {basisMessage}
       </div>
 
       {!data ? (
@@ -104,7 +119,7 @@ export default function SeverityHeatmap() {
             }}
           >
             <span style={{ fontSize: "0.78rem", color: "var(--text-dim)" }}>
-              Total Alerts (7 days)
+              {feed.length ? "Live Stream Total" : "Total Alerts (7 days)"}
             </span>
             <span
               style={{
